@@ -1,0 +1,102 @@
+using Godot;
+using PhysicsSimulator.Rendering;
+using PhysicsSimulator.Simulation;
+
+namespace PhysicsSimulator.Godot;
+
+/// <summary>
+/// Main simulation node. Bridges the simulation layer to the Godot scene tree.
+/// Owns the FluidSimulation and SimulationRenderer, drives the simulation each frame.
+/// </summary>
+public partial class SimulationNode : Node3D
+{
+    private FluidSimulation _simulation = null!;
+    private SimulationRenderer _renderer = null!;
+
+    /// <summary>
+    /// Whether the simulation is currently running.
+    /// </summary>
+    public bool IsRunning { get; private set; }
+
+    public override void _Ready()
+    {
+        var parameters = new SimulationParameters();
+        _simulation = new FluidSimulation(parameters);
+
+        _renderer = new SimulationRenderer();
+        AddChild(_renderer);
+
+        // Create a small test block of particles so we can verify rendering
+        SpawnTestParticles();
+
+        // Start paused so the user can see the initial state
+        IsRunning = false;
+        GD.Print($"[SimulationNode] Ready. {_simulation.ParticleCount} particles. Simulation paused.");
+    }
+
+    public override void _Process(double delta)
+    {
+        if (!IsRunning)
+            return;
+
+        _simulation.Step((float)delta);
+        _renderer.UpdateParticles(_simulation.Particles);
+    }
+
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventKey key && key.Pressed)
+        {
+            switch (key.Keycode)
+            {
+                case Key.Space:
+                    ToggleSimulation();
+                    GetViewport().SetInputAsHandled();
+                    break;
+                case Key.R:
+                    ResetSimulation();
+                    GetViewport().SetInputAsHandled();
+                    break;
+            }
+        }
+    }
+
+    public void ToggleSimulation()
+    {
+        IsRunning = !IsRunning;
+        GD.Print($"[SimulationNode] Simulation {(IsRunning ? "started" : "paused")}.");
+    }
+
+    public void ResetSimulation()
+    {
+        IsRunning = false;
+        _simulation.Reset();
+        SpawnTestParticles();
+        _renderer.UpdateParticles(_simulation.Particles);
+        GD.Print($"[SimulationNode] Simulation reset. {_simulation.ParticleCount} particles.");
+    }
+
+    /// <summary>
+    /// Creates a small 4x4x4 cube of particles for testing.
+    /// </summary>
+    private void SpawnTestParticles()
+    {
+        float spacing = 0.08f;
+        int countPerAxis = 4;
+        float offset = (countPerAxis - 1) * spacing * 0.5f;
+
+        for (int x = 0; x < countPerAxis; x++)
+        for (int y = 0; y < countPerAxis; y++)
+        for (int z = 0; z < countPerAxis; z++)
+        {
+            var pos = new System.Numerics.Vector3(
+                x * spacing - offset,
+                y * spacing + 0.5f,  // raise above origin so particles can fall
+                z * spacing - offset
+            );
+            _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
+        }
+
+        _renderer.UpdateParticles(_simulation.Particles);
+    }
+}

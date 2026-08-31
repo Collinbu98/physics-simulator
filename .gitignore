@@ -1,0 +1,42 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Godot-specific Mono ignores
+.mono/
+data_*/
+mono_crash.*.json
+
+# Build results
+[Bb]uild/
+[Ll]ibrary/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nupkg
+**/packages/repositories.config
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# .NET
+*.log
+*.pidb
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
