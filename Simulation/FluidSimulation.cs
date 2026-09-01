@@ -92,6 +92,7 @@ public class FluidSimulation
     {
         RebuildGrid();
         ComputeAllDensities();
+        ComputeAllPressures();
 
         var gravity = new Vector3(0.0f, _parameters.Gravity, 0.0f);
 
@@ -155,6 +156,24 @@ public class FluidSimulation
 
             var p = _particles[i];
             p.Density = density;
+            _particles[i] = p;
+        }
+    }
+
+    /// <summary>
+    /// Computes pressure for all particles using the equation of state: P = k * (rho - rho_0).
+    /// Must be called after ComputeAllDensities so that Particle.Density is populated.
+    /// Does not affect velocity, acceleration, or position.
+    /// </summary>
+    public void ComputeAllPressures()
+    {
+        float k = _parameters.PressureStiffness;
+        float rho0 = _parameters.RestDensity;
+
+        for (int i = 0; i < _particles.Count; i++)
+        {
+            var p = _particles[i];
+            p.Pressure = k * (p.Density - rho0);
             _particles[i] = p;
         }
     }
@@ -312,5 +331,54 @@ public class FluidSimulation
                $"Rest: {_parameters.RestDensity:F4}, " +
                $"Mismatches: {mismatches}/{n}, " +
                $"h: {h}, mass: {mass}";
+    }
+
+    /// <summary>
+    /// Diagnostic: reports pressure statistics computed from the equation of state.
+    /// Assumes ComputeAllDensities and ComputeAllPressures have been called.
+    /// Verifies P = k * (rho - rho_0) by recalculating from stored density values.
+    /// </summary>
+    public string RunPressureDiagnostic()
+    {
+        int n = _particles.Count;
+        float k = _parameters.PressureStiffness;
+        float rho0 = _parameters.RestDensity;
+
+        float minPressure = float.MaxValue;
+        float maxPressure = float.MinValue;
+        float totalPressure = 0.0f;
+        float minDensity = float.MaxValue;
+        float maxDensity = float.MinValue;
+        float totalDensity = 0.0f;
+        int eosMismatches = 0;
+
+        for (int i = 0; i < n; i++)
+        {
+            float density = _particles[i].Density;
+            float pressure = _particles[i].Pressure;
+
+            // Verify equation of state independently
+            float expectedPressure = k * (density - rho0);
+            if (MathF.Abs(pressure - expectedPressure) > 0.001f)
+                eosMismatches++;
+
+            if (pressure < minPressure) minPressure = pressure;
+            if (pressure > maxPressure) maxPressure = pressure;
+            totalPressure += pressure;
+
+            if (density < minDensity) minDensity = density;
+            if (density > maxDensity) maxDensity = density;
+            totalDensity += density;
+        }
+
+        float avgPressure = n > 0 ? totalPressure / n : 0.0f;
+        float avgDensity = n > 0 ? totalDensity / n : 0.0f;
+
+        return $"Particles: {n}\n" +
+               $"  Pressure — min: {minPressure:F4}, max: {maxPressure:F4}, avg: {avgPressure:F4}\n" +
+               $"  Density  — min: {minDensity:F4}, max: {maxDensity:F4}, avg: {avgDensity:F4}\n" +
+               $"  Rest density: {rho0:F4}, Pressure stiffness (k): {k:F4}\n" +
+               $"  EOS mismatches: {eosMismatches}/{n} " +
+               $"(P = k * (rho - rho_0))";
     }
 }

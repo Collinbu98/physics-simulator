@@ -19,9 +19,11 @@ public class SimulationParameters
     public float RestDensity { get; set; } = 1000.0f;
 
     /// <summary>
-    /// Stiffness constant for the equation of state (pressure calculation).
+    /// Pressure stiffness constant (k) for the equation of state: P = k * (rho - rho_0).
+    /// Higher values make the fluid more incompressible but may cause instability.
+    /// This is an initial value for experimentation; tune as needed.
     /// </summary>
-    public float Stiffness { get; set; } = 200.0f;
+    public float PressureStiffness { get; set; } = 200.0f;
 
     /// <summary>
     /// Dynamic viscosity coefficient.

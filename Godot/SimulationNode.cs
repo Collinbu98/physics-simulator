@@ -65,6 +65,10 @@ public partial class SimulationNode : Node3D
                     RunDensityDiagnostic();
                     GetViewport().SetInputAsHandled();
                     break;
+                case Key.F3:
+                    RunPressureDiagnostic();
+                    GetViewport().SetInputAsHandled();
+                    break;
             }
         }
     }
@@ -130,5 +134,18 @@ public partial class SimulationNode : Node3D
 
         string result = _simulation.RunDensityDiagnostic();
         GD.Print($"[DensityDiagnostic] {result}");
+    }
+
+    private void RunPressureDiagnostic()
+    {
+        _simulation.Grid.Clear();
+        for (int i = 0; i < _simulation.ParticleCount; i++)
+            _simulation.Grid.Insert(i, _simulation.Particles[i].Position);
+
+        _simulation.ComputeAllDensities();
+        _simulation.ComputeAllPressures();
+
+        string result = _simulation.RunPressureDiagnostic();
+        GD.Print($"[PressureDiagnostic]\n{result}");
     }
 }
