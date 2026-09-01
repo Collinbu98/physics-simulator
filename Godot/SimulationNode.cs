@@ -57,6 +57,14 @@ public partial class SimulationNode : Node3D
                     ResetSimulation();
                     GetViewport().SetInputAsHandled();
                     break;
+                case Key.F1:
+                    RunNeighborDiagnostic();
+                    GetViewport().SetInputAsHandled();
+                    break;
+                case Key.F2:
+                    RunDensityDiagnostic();
+                    GetViewport().SetInputAsHandled();
+                    break;
             }
         }
     }
@@ -98,5 +106,29 @@ public partial class SimulationNode : Node3D
         }
 
         _renderer.UpdateParticles(_simulation.Particles);
+    }
+
+    private void RunNeighborDiagnostic()
+    {
+        // Rebuild grid at current positions so we can query
+        _simulation.Grid.Clear();
+        for (int i = 0; i < _simulation.ParticleCount; i++)
+            _simulation.Grid.Insert(i, _simulation.Particles[i].Position);
+
+        string result = _simulation.RunNeighborSearchDiagnostic();
+        GD.Print($"[NeighborDiagnostic] {result}");
+    }
+
+    private void RunDensityDiagnostic()
+    {
+        // Rebuild grid and compute density at current positions
+        _simulation.Grid.Clear();
+        for (int i = 0; i < _simulation.ParticleCount; i++)
+            _simulation.Grid.Insert(i, _simulation.Particles[i].Position);
+
+        _simulation.ComputeAllDensities();
+
+        string result = _simulation.RunDensityDiagnostic();
+        GD.Print($"[DensityDiagnostic] {result}");
     }
 }
