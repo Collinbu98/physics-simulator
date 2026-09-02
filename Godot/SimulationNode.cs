@@ -69,6 +69,14 @@ public partial class SimulationNode : Node3D
                     RunPressureDiagnostic();
                     GetViewport().SetInputAsHandled();
                     break;
+                case Key.F4:
+                    RunPressureForceDiagnostic();
+                    GetViewport().SetInputAsHandled();
+                    break;
+                case Key.N:
+                    StepOnce();
+                    GetViewport().SetInputAsHandled();
+                    break;
             }
         }
     }
@@ -79,12 +87,23 @@ public partial class SimulationNode : Node3D
         GD.Print($"[SimulationNode] Simulation {(IsRunning ? "started" : "paused")}.");
     }
 
+    public void StepOnce()
+    {
+        _simulation.StepOnce();
+        _renderer.UpdateParticles(_simulation.Particles);
+        GD.Print($"[Simulation] Step {_simulation.StepCount} (single step)");
+    }
+
     public void ResetSimulation()
     {
         IsRunning = false;
         _simulation.Reset();
         SpawnTestParticles();
         _renderer.UpdateParticles(_simulation.Particles);
+
+        if (GetNode<Camera3D>("../Camera3D") is CameraController cam)
+            cam.ResetCamera();
+
         GD.Print($"[SimulationNode] Simulation reset. {_simulation.ParticleCount} particles.");
     }
 
@@ -96,15 +115,17 @@ public partial class SimulationNode : Node3D
         float spacing = 0.08f;
         int countPerAxis = 4;
         float offset = (countPerAxis - 1) * spacing * 0.5f;
+        var rng = new System.Random();
 
         for (int x = 0; x < countPerAxis; x++)
         for (int y = 0; y < countPerAxis; y++)
         for (int z = 0; z < countPerAxis; z++)
         {
+            float noise = 0.005f;
             var pos = new System.Numerics.Vector3(
-                x * spacing - offset,
-                y * spacing + 0.5f,  // raise above origin so particles can fall
-                z * spacing - offset
+                x * spacing - offset + (float)(rng.NextDouble() * 2 - 1) * noise,
+                y * spacing + 0.5f + (float)(rng.NextDouble() * 2 - 1) * noise,
+                z * spacing - offset + (float)(rng.NextDouble() * 2 - 1) * noise
             );
             _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
         }
@@ -147,5 +168,19 @@ public partial class SimulationNode : Node3D
 
         string result = _simulation.RunPressureDiagnostic();
         GD.Print($"[PressureDiagnostic]\n{result}");
+    }
+
+    private void RunPressureForceDiagnostic()
+    {
+        _simulation.Grid.Clear();
+        for (int i = 0; i < _simulation.ParticleCount; i++)
+            _simulation.Grid.Insert(i, _simulation.Particles[i].Position);
+
+        _simulation.ComputeAllDensities();
+        _simulation.ComputeAllPressures();
+        _simulation.ComputeAllPressureForces();
+
+        string result = _simulation.RunPressureForceDiagnostic();
+        GD.Print($"[PressureForceDiagnostic]\n{result}");
     }
 }

@@ -16,6 +16,16 @@ public class FluidSimulation
     private readonly List<int> _neighborBuffer = new();
     private float _timeAccumulator;
 
+    // Diagnostic storage for pressure force magnitudes (updated each step)
+    private float _minPressureForceMagnitude = float.MaxValue;
+    private float _maxPressureForceMagnitude = float.MinValue;
+    private float _totalPressureForceMagnitude;
+    private int _pressureForceCount;
+    private bool _pressureForceNonFinite;
+    private float _maxAccelerationMagnitude;
+    private float _maxVelocityMagnitude;
+    private long _stepCount;
+
     /// <summary>
     /// Read-only access to particle data.
     /// </summary>
@@ -27,6 +37,11 @@ public class FluidSimulation
     public int ParticleCount => _particles.Count;
 
     public SimulationParameters Parameters => _parameters;
+
+    /// <summary>
+    /// Total number of fixed timesteps executed since the last Reset().
+    /// </summary>
+    public long StepCount => _stepCount;
 
     /// <summary>
     /// The spatial grid used for neighbor searching. Rebuilt each fixed step.
@@ -47,6 +62,7 @@ public class FluidSimulation
         _particles.Clear();
         _grid.Clear();
         _timeAccumulator = 0.0f;
+        _stepCount = 0;
     }
 
     /// <summary>
@@ -85,29 +101,49 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// One fixed-size simulation step. This is where SPH forces will be computed.
-    /// Currently a placeholder: integrates gravity and applies basic Euler integration.
+    /// Advances the simulation by exactly one fixed timestep, regardless of
+    /// TimeScale or the accumulator. Intended for single-step debugging while paused.
+    /// </summary>
+    public void StepOnce()
+    {
+        FixedStep(_parameters.TimeStep);
+    }
+
+    /// <summary>
+    /// One fixed-size simulation step. Computes SPH pressure forces and integrates motion.
+    /// Pipeline: grid → density → pressure → pressure force → acceleration → velocity → position
     /// </summary>
     private void FixedStep(float dt)
     {
+        _stepCount++;
         RebuildGrid();
         ComputeAllDensities();
         ComputeAllPressures();
+        ComputeAllPressureForces();
 
         var gravity = new Vector3(0.0f, _parameters.Gravity, 0.0f);
+
+        // Reset velocity diagnostic before integration
+        _maxVelocityMagnitude = 0.0f;
 
         for (int i = 0; i < _particles.Count; i++)
         {
             var p = _particles[i];
 
-            // Placeholder: apply gravity
-            p.Acceleration = gravity;
+            // Combine gravity and pressure acceleration (already stored in p.Acceleration)
+            // p.Acceleration was set by ComputeAllPressureForces; add gravity here
+            p.Acceleration += gravity;
 
             // Euler integration
             p.Velocity += p.Acceleration * dt;
             p.Position += p.Velocity * dt;
 
             _particles[i] = p;
+
+            // Track max velocity magnitude for diagnostics
+            float velMag = p.Velocity.Length();
+            if (velMag > _maxVelocityMagnitude)
+                _maxVelocityMagnitude = velMag;
         }
     }
 
@@ -175,6 +211,105 @@ public class FluidSimulation
             var p = _particles[i];
             p.Pressure = k * (p.Density - rho0);
             _particles[i] = p;
+        }
+    }
+
+    /// <summary>
+    /// Computes SPH pressure forces for all particles using the symmetric formulation:
+    ///   F_i = Σ_j m_j × (P_i/ρ_i² + P_j/ρ_j²) × ∇W_spiky(r_ij, h)
+    ///
+    /// Uses the Spiky kernel gradient. Handles zero-density and coincident particles safely.
+    /// Must be called after ComputeAllDensities and ComputeAllPressures.
+    /// Stores the force-per-unit-mass (acceleration) in Particle.Acceleration.
+    /// </summary>
+    public void ComputeAllPressureForces()
+    {
+        float h = _parameters.SmoothingRadius;
+        float h2 = h * h;
+        float mass = _parameters.ParticleMass;
+        float spikyCoeff = SPHKernels.SpikyGradientCoefficient(h);
+
+        // Reset diagnostic accumulators
+        _minPressureForceMagnitude = float.MaxValue;
+        _maxPressureForceMagnitude = float.MinValue;
+        _totalPressureForceMagnitude = 0.0f;
+        _pressureForceCount = 0;
+        _pressureForceNonFinite = false;
+        _maxAccelerationMagnitude = 0.0f;
+        _maxVelocityMagnitude = 0.0f;
+
+        for (int i = 0; i < _particles.Count; i++)
+        {
+            var pi = _particles[i];
+
+            // Guard: zero or negative density → skip force (will be caught by diagnostic)
+            if (pi.Density <= 0.0f)
+            {
+                pi.Acceleration = Vector3.Zero;
+                _particles[i] = pi;
+                continue;
+            }
+
+            float rhoI = pi.Density;
+            float pOverRhoI2 = pi.Pressure / (rhoI * rhoI);
+
+            Vector3 totalForce = Vector3.Zero;
+
+            GetNeighbors(i, _neighborBuffer);
+            Vector3 posI = pi.Position;
+
+            for (int n = 0; n < _neighborBuffer.Count; n++)
+            {
+                int j = _neighborBuffer[n];
+                var pj = _particles[j];
+
+                // Guard: zero or negative density for neighbor
+                if (pj.Density <= 0.0f)
+                    continue;
+
+                float rhoJ = pj.Density;
+                float pOverRhoJ2 = pj.Pressure / (rhoJ * rhoJ);
+
+                // r_ij = r_j - r_i (points from i toward j)
+                Vector3 rVec = pj.Position - posI;
+
+                // Spiky gradient: ∇W_spiky(r_ij, h)
+                Vector3 gradW = SPHKernels.SpikyGradient(rVec, h2, spikyCoeff);
+
+                // Symmetric pressure force term:
+                // F_i += m_j × (P_i/ρ_i² + P_j/ρ_j²) × ∇W_spiky
+                totalForce += mass * (pOverRhoI2 + pOverRhoJ2) * gradW;
+            }
+
+            // Convert force to acceleration: a = F / m_i
+            Vector3 acceleration = totalForce / pi.Mass;
+
+            // Diagnostic: track magnitudes
+            float forceMag = totalForce.Length();
+            if (_pressureForceCount == 0 || forceMag < _minPressureForceMagnitude)
+                _minPressureForceMagnitude = forceMag;
+            if (forceMag > _maxPressureForceMagnitude)
+                _maxPressureForceMagnitude = forceMag;
+            _totalPressureForceMagnitude += forceMag;
+            _pressureForceCount++;
+
+            float accelMag = acceleration.Length();
+            if (accelMag > _maxAccelerationMagnitude)
+                _maxAccelerationMagnitude = accelMag;
+
+            // Check for non-finite values
+            if (!float.IsFinite(acceleration.X) || !float.IsFinite(acceleration.Y) || !float.IsFinite(acceleration.Z))
+                _pressureForceNonFinite = true;
+            if (!float.IsFinite(totalForce.Length()))
+                _pressureForceNonFinite = true;
+
+            // Track velocity magnitude (needed when F4 calls this standalone)
+            float velMag = pi.Velocity.Length();
+            if (velMag > _maxVelocityMagnitude)
+                _maxVelocityMagnitude = velMag;
+
+            pi.Acceleration = acceleration;
+            _particles[i] = pi;
         }
     }
 
@@ -380,5 +515,46 @@ public class FluidSimulation
                $"  Rest density: {rho0:F4}, Pressure stiffness (k): {k:F4}\n" +
                $"  EOS mismatches: {eosMismatches}/{n} " +
                $"(P = k * (rho - rho_0))";
+    }
+
+    /// <summary>
+    /// Diagnostic (F4): reports pressure force statistics after ComputeAllPressureForces has been called.
+    /// Includes min/max/average pressure force magnitude, max acceleration, max velocity,
+    /// and non-finite value detection.
+    /// </summary>
+    public string RunPressureForceDiagnostic()
+    {
+        int n = _particles.Count;
+        float avgForce = _pressureForceCount > 0
+            ? _totalPressureForceMagnitude / _pressureForceCount
+            : 0.0f;
+
+        // Count zero-density particles
+        int zeroDensityCount = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (_particles[i].Density <= 0.0f)
+                zeroDensityCount++;
+        }
+
+        // Verify that acceleration was actually set by pressure force
+        // (check that at least one particle has non-zero acceleration from pressure)
+        int particlesWithPressureAccel = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (_particles[i].Acceleration.LengthSquared() > 1e-10f)
+                particlesWithPressureAccel++;
+        }
+
+        return $"Particles: {n}\n" +
+               $"  Pressure force magnitude — min: {_minPressureForceMagnitude:E4}, " +
+               $"max: {_maxPressureForceMagnitude:E4}, avg: {avgForce:E4}\n" +
+               $"  Max acceleration (pressure only): {_maxAccelerationMagnitude:E4} m/s²\n" +
+               $"  Max velocity: {_maxVelocityMagnitude:E4} m/s\n" +
+               $"  Zero-density particles: {zeroDensityCount}/{n}\n" +
+               $"  Particles with non-zero acceleration: {particlesWithPressureAccel}/{n}\n" +
+               $"  Non-finite values encountered: {_pressureForceNonFinite}\n" +
+               $"  Parameters: h={_parameters.SmoothingRadius}, mass={_parameters.ParticleMass}, " +
+               $"k={_parameters.PressureStiffness}, restDensity={_parameters.RestDensity}";
     }
 }

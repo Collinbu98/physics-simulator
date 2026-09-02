@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 
 namespace PhysicsSimulator.Simulation;
 
@@ -72,5 +73,73 @@ public static class SPHKernels
         float h3 = h * h * h;
         float h9 = h3 * h3 * h3;
         return 315.0f / (64.0f * MathF.PI * h9);
+    }
+
+    // -----------------------------------------------------------------------
+    // Spiky kernel gradient
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Spiky kernel gradient in 3D:
+    ///   W(r, h) = 15/(π h⁶) × (h - |r|)³
+    ///   ∇W(r, h) = -45/(π h⁶) × (h - |r|)² × r̂
+    /// where r̂ = r/|r| is the unit direction vector.
+    ///
+    /// The gradient points inward (toward the particle), so a positive pressure
+    /// difference pushes particles apart.
+    /// </summary>
+    /// <param name="rVec">Vector from particle i to particle j (r_j - r_i).</param>
+    /// <param name="h">Smoothing radius.</param>
+    /// <returns>Gradient of the Spiky kernel at this separation.</returns>
+    public static Vector3 SpikyGradient(Vector3 rVec, float h)
+    {
+        float distSq = rVec.LengthSquared();
+        if (distSq >= h * h || distSq < 1e-20f)
+            return Vector3.Zero;
+
+        float dist = MathF.Sqrt(distSq);
+        float hMinusR = h - dist;
+        float hMinusR2 = hMinusR * hMinusR;
+        float coeff = -45.0f / (MathF.PI * h * h * h * h * h * h);
+
+        // r̂ = rVec / dist (unit direction)
+        Vector3 rHat = rVec / dist;
+
+        return coeff * hMinusR2 * rHat;
+    }
+
+    /// <summary>
+    /// Spiky kernel gradient evaluated with a precomputed coefficient.
+    /// Precompute with SpikyGradientCoefficient(h), then call this in tight loops.
+    /// </summary>
+    /// <param name="rVec">Vector from particle i to particle j (r_j - r_i).</param>
+    /// <param name="h2">Smoothing radius squared (h*h).</param>
+    /// <param name="coefficient">Precomputed -45/(π h⁶).</param>
+    /// <returns>Gradient of the Spiky kernel at this separation.</returns>
+    public static Vector3 SpikyGradient(Vector3 rVec, float h2, float coefficient)
+    {
+        float distSq = rVec.LengthSquared();
+        if (distSq >= h2 || distSq < 1e-20f)
+            return Vector3.Zero;
+
+        float dist = MathF.Sqrt(distSq);
+        float h = MathF.Sqrt(h2);
+        float hMinusR = h - dist;
+        float hMinusR2 = hMinusR * hMinusR;
+        Vector3 rHat = rVec / dist;
+
+        return coefficient * hMinusR2 * rHat;
+    }
+
+    /// <summary>
+    /// Precomputed Spiky gradient coefficient: -45 / (π h⁶).
+    /// Call once before a loop, then pass to SpikyGradient(rVec, h2, coefficient).
+    /// </summary>
+    /// <param name="h">Smoothing radius.</param>
+    /// <returns>The coefficient -45/(π h⁶).</returns>
+    public static float SpikyGradientCoefficient(float h)
+    {
+        float h6 = h * h * h * h * h * h;
+        return -45.0f / (MathF.PI * h6);
     }
 }

@@ -1,6 +1,7 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene format=3 uid="uid://cdgsntvala25g"]
 
-[ext_resource type="Script" path="res://Godot/SimulationNode.cs" id="1"]
+[ext_resource type="Script" uid="uid://b0ycy05gk7ubh" path="res://Godot/SimulationNode.cs" id="1"]
+[ext_resource type="Script" uid="uid://cp5ea8rip2doo" path="res://Godot/CameraController.cs" id="2"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_abc12"]
 
@@ -14,19 +15,19 @@ ambient_light_source = 2
 ambient_light_color = Color(0.3, 0.35, 0.4, 1)
 ambient_light_energy = 0.5
 
-[node name="Main" type="Node3D"]
+[node name="Main" type="Node3D" unique_id=718368564]
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=828894559]
 environment = SubResource("Environment_abc12")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=2007719343]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 5, 0)
-light_energy = 1.0
 shadow_enabled = true
 
-[node name="Camera3D" type="Camera3D" parent="."]
+[node name="Camera3D" type="Camera3D" parent="." unique_id=878928837]
 transform = Transform3D(1, 0, 0, 0, 0.866, 0.5, 0, -0.5, 0.866, 0, 3, 3)
 fov = 50.0
+script = ExtResource("2")
 
-[node name="Simulation" type="Node3D" parent="."]
+[node name="Simulation" type="Node3D" parent="." unique_id=1364228713]
 script = ExtResource("1")
