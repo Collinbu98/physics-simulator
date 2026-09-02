@@ -5,7 +5,8 @@ namespace PhysicsSimulator.Simulation;
 
 /// <summary>
 /// SPH kernel functions. All methods are pure math with no state.
-/// Currently implements the Poly6 kernel for density estimation.
+/// Implements the Poly6 kernel for density estimation, Spiky kernel gradient for
+/// pressure forces, and the viscosity kernel Laplacian for viscous diffusion.
 /// </summary>
 public static class SPHKernels
 {
@@ -141,5 +142,61 @@ public static class SPHKernels
     {
         float h6 = h * h * h * h * h * h;
         return -45.0f / (MathF.PI * h6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Viscosity kernel Laplacian
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Laplacian of the SPH viscosity kernel in 3D:
+    ///   ∇²W_visc(r, h) = 45 / (π h⁶) × (h - |r|)  for r ≤ h, else 0.
+    ///
+    /// This kernel is designed so its Laplacian is positive everywhere inside the
+    /// support radius, making it ideal for diffusion terms like viscosity.
+    /// When used in the viscosity force:
+    ///   F_i^visc = Σ_j m_j × ν × (v_j - v_i)/ρ_j × ∇²W(r_ij, h)
+    /// it pulls particle i's velocity toward its neighbors' velocities.
+    /// </summary>
+    /// <param name="rVec">Vector from particle i to particle j (r_j - r_i).</param>
+    /// <param name="h">Smoothing radius.</param>
+    /// <returns>Laplacian of the viscosity kernel at this separation.</returns>
+    public static float ViscosityLaplacian(Vector3 rVec, float h)
+    {
+        float distSq = rVec.LengthSquared();
+        if (distSq >= h * h)
+            return 0.0f;
+
+        float dist = MathF.Sqrt(distSq);
+        float coeff = 45.0f / (MathF.PI * h * h * h * h * h * h);
+        return coeff * (h - dist);
+    }
+
+    /// <summary>
+    /// Laplacian of the SPH viscosity kernel evaluated with a precomputed coefficient.
+    /// Precompute with ViscosityLaplacianCoefficient(h), then call this in tight loops.
+    /// </summary>
+    /// <param name="dist">Distance between particles (not squared).</param>
+    /// <param name="h">Smoothing radius.</param>
+    /// <param name="coefficient">Precomputed 45/(π h⁶).</param>
+    /// <returns>Laplacian of the viscosity kernel at this distance.</returns>
+    public static float ViscosityLaplacian(float dist, float h, float coefficient)
+    {
+        if (dist >= h)
+            return 0.0f;
+
+        return coefficient * (h - dist);
+    }
+
+    /// <summary>
+    /// Precomputed viscosity Laplacian coefficient: 45 / (π h⁶).
+    /// Call once before a loop, then pass to ViscosityLaplacian(dist, h, coefficient).
+    /// </summary>
+    /// <param name="h">Smoothing radius.</param>
+    /// <returns>The coefficient 45/(π h⁶).</returns>
+    public static float ViscosityLaplacianCoefficient(float h)
+    {
+        float h6 = h * h * h * h * h * h;
+        return 45.0f / (MathF.PI * h6);
     }
 }

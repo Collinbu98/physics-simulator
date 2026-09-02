@@ -29,9 +29,15 @@ public partial class SimulationNode : Node3D
         // Create a small test block of particles so we can verify rendering
         SpawnTestParticles();
 
+        // Draw the container wireframe
+        var (hx, h, hz) = _simulation.GetContainerHalfExtents();
+        _renderer.UpdateContainerWireframe(hx, h, hz);
+
         // Start paused so the user can see the initial state
         IsRunning = false;
-        GD.Print($"[SimulationNode] Ready. {_simulation.ParticleCount} particles. Simulation paused.");
+        GD.Print($"[SimulationNode] Ready. {_simulation.ParticleCount} particles. " +
+                 $"Container: {parameters.ContainerWidth}×{parameters.ContainerHeight}×{parameters.ContainerDepth} m, " +
+                 $"restitution={parameters.BoundaryRestitution}. Simulation paused.");
     }
 
     public override void _Process(double delta)
@@ -77,6 +83,10 @@ public partial class SimulationNode : Node3D
                     StepOnce();
                     GetViewport().SetInputAsHandled();
                     break;
+                case Key.F5:
+                    RunPressureRestorationDiagnostic();
+                    GetViewport().SetInputAsHandled();
+                    break;
             }
         }
     }
@@ -91,7 +101,8 @@ public partial class SimulationNode : Node3D
     {
         _simulation.StepOnce();
         _renderer.UpdateParticles(_simulation.Particles);
-        GD.Print($"[Simulation] Step {_simulation.StepCount} (single step)");
+        GD.Print($"[Simulation] Step {_simulation.StepCount} (single step) — " +
+                 $"boundary collisions: {_simulation.LastBoundaryCollisions}");
     }
 
     public void ResetSimulation()
@@ -100,6 +111,10 @@ public partial class SimulationNode : Node3D
         _simulation.Reset();
         SpawnTestParticles();
         _renderer.UpdateParticles(_simulation.Particles);
+
+        // Redraw the container wireframe
+        var (hx, h, hz) = _simulation.GetContainerHalfExtents();
+        _renderer.UpdateContainerWireframe(hx, h, hz);
 
         if (GetNode<Camera3D>("../Camera3D") is CameraController cam)
             cam.ResetCamera();
@@ -131,6 +146,72 @@ public partial class SimulationNode : Node3D
         }
 
         _renderer.UpdateParticles(_simulation.Particles);
+    }
+
+    /// <summary>
+    /// Creates a perfect 4×4×4 lattice with no jitter, centered at (0, 0.5, 0).
+    /// Used by the pressure-restoration diagnostic to get a clean, symmetric baseline.
+    /// </summary>
+    private void SpawnCleanLattice()
+    {
+        float spacing = 0.08f;
+        int countPerAxis = 4;
+        float offset = (countPerAxis - 1) * spacing * 0.5f;
+
+        for (int x = 0; x < countPerAxis; x++)
+        for (int y = 0; y < countPerAxis; y++)
+        for (int z = 0; z < countPerAxis; z++)
+        {
+            var pos = new System.Numerics.Vector3(
+                x * spacing - offset,
+                y * spacing + 0.5f,
+                z * spacing - offset
+            );
+            _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
+        }
+
+        _renderer.UpdateParticles(_simulation.Particles);
+    }
+
+    /// <summary>
+    /// F5: Pressure-restoration diagnostic.
+    /// Spawns a clean lattice, displaces one particle inward, runs the full SPH pipeline,
+    /// and reports whether the pressure force opposes the compression.
+    /// </summary>
+    private void RunPressureRestorationDiagnostic()
+    {
+        IsRunning = false;
+
+        // 1. Clean lattice (no jitter)
+        _simulation.Reset();
+        SpawnCleanLattice();
+
+        // 2. Choose an interior particle (2,2,2) — well inside the block on all sides
+        int perturbedIndex = 2 + 4 * 2 + 16 * 2; // = 42
+
+        // 3. Displace inward toward center of block by ~0.01 m
+        var originalPos = _simulation.Particles[perturbedIndex].Position;
+        System.Numerics.Vector3 center = new(0.0f, 0.5f, 0.0f);
+        System.Numerics.Vector3 inward = center - originalPos;
+        float inwardLen = inward.Length();
+        float displacementMagnitude = 0.01f;
+        System.Numerics.Vector3 displacement = (inward / inwardLen) * displacementMagnitude;
+
+        _simulation.SetParticlePosition(perturbedIndex, originalPos + displacement);
+
+        // 4. Rebuild grid and run full SPH pipeline (density → pressure → force)
+        _simulation.Grid.Clear();
+        for (int i = 0; i < _simulation.ParticleCount; i++)
+            _simulation.Grid.Insert(i, _simulation.Particles[i].Position);
+
+        _simulation.ComputeAllDensities();
+        _simulation.ComputeAllPressures();
+        _simulation.ComputeAllPressureForces();
+        _simulation.ComputeAllViscosityForces();
+
+        // 5. Report results
+        string result = _simulation.RunPressureRestorationDiagnostic(perturbedIndex, displacement);
+        GD.Print(result);
     }
 
     private void RunNeighborDiagnostic()
@@ -179,6 +260,7 @@ public partial class SimulationNode : Node3D
         _simulation.ComputeAllDensities();
         _simulation.ComputeAllPressures();
         _simulation.ComputeAllPressureForces();
+        _simulation.ComputeAllViscosityForces();
 
         string result = _simulation.RunPressureForceDiagnostic();
         GD.Print($"[PressureForceDiagnostic]\n{result}");

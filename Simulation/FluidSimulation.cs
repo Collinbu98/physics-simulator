@@ -24,7 +24,15 @@ public class FluidSimulation
     private bool _pressureForceNonFinite;
     private float _maxAccelerationMagnitude;
     private float _maxVelocityMagnitude;
+
+    // Diagnostic storage for viscosity force magnitudes (updated each step)
+    private float _minViscosityForceMagnitude = float.MaxValue;
+    private float _maxViscosityForceMagnitude = float.MinValue;
+    private float _totalViscosityForceMagnitude;
+    private int _viscosityForceCount;
+
     private long _stepCount;
+    private int _lastBoundaryCollisions;
 
     /// <summary>
     /// Read-only access to particle data.
@@ -42,6 +50,11 @@ public class FluidSimulation
     /// Total number of fixed timesteps executed since the last Reset().
     /// </summary>
     public long StepCount => _stepCount;
+
+    /// <summary>
+    /// Number of boundary collisions in the most recent fixed step.
+    /// </summary>
+    public int LastBoundaryCollisions => _lastBoundaryCollisions;
 
     /// <summary>
     /// The spatial grid used for neighbor searching. Rebuilt each fixed step.
@@ -82,6 +95,17 @@ public class FluidSimulation
     }
 
     /// <summary>
+    /// Moves a single particle to a new position. Used by diagnostics that need
+    /// to perturb one particle after spawning a clean lattice.
+    /// </summary>
+    public void SetParticlePosition(int index, Vector3 newPosition)
+    {
+        var p = _particles[index];
+        p.Position = newPosition;
+        _particles[index] = p;
+    }
+
+    /// <summary>
     /// Advances the simulation by the given real-time delta (in seconds).
     /// Uses a fixed-timestep accumulator for deterministic behavior.
     /// Does nothing if TimeScale is zero.
@@ -116,10 +140,12 @@ public class FluidSimulation
     private void FixedStep(float dt)
     {
         _stepCount++;
+        _lastBoundaryCollisions = 0;
         RebuildGrid();
         ComputeAllDensities();
         ComputeAllPressures();
         ComputeAllPressureForces();
+        ComputeAllViscosityForces();
 
         var gravity = new Vector3(0.0f, _parameters.Gravity, 0.0f);
 
@@ -145,6 +171,9 @@ public class FluidSimulation
             if (velMag > _maxVelocityMagnitude)
                 _maxVelocityMagnitude = velMag;
         }
+
+        // Enforce container boundaries after position integration
+        HandleBoundaryCollisions();
     }
 
     /// <summary>
@@ -314,6 +343,86 @@ public class FluidSimulation
     }
 
     /// <summary>
+    /// Computes SPH viscosity forces for all particles using the standard formulation:
+    ///   a_i^visc = (1/ρ_i) × Σ_j m_j × ν × (v_j - v_i)/ρ_j × ∇²W_visc(r_ij, h)
+    ///
+    /// Uses the viscosity kernel Laplacian: ∇²W_visc(r, h) = 45/(π h⁶) × (h - |r|).
+    /// This force pulls particle velocities toward their neighbors' velocities (velocity diffusion).
+    /// Must be called after RebuildGrid and ComputeAllDensities.
+    /// Adds the viscous acceleration to the existing Particle.Acceleration (which already contains
+    /// pressure acceleration from ComputeAllPressureForces).
+    /// </summary>
+    public void ComputeAllViscosityForces()
+    {
+        float h = _parameters.SmoothingRadius;
+        float h2 = h * h;
+        float mass = _parameters.ParticleMass;
+        float nu = _parameters.KinematicViscosity;
+        float viscLapCoeff = SPHKernels.ViscosityLaplacianCoefficient(h);
+
+        // Reset viscosity diagnostic accumulators
+        _minViscosityForceMagnitude = float.MaxValue;
+        _maxViscosityForceMagnitude = float.MinValue;
+        _totalViscosityForceMagnitude = 0.0f;
+        _viscosityForceCount = 0;
+
+        for (int i = 0; i < _particles.Count; i++)
+        {
+            var pi = _particles[i];
+
+            // Guard: zero or negative density → skip
+            if (pi.Density <= 0.0f)
+                continue;
+
+            float rhoI = pi.Density;
+            Vector3 posI = pi.Position;
+            Vector3 velI = pi.Velocity;
+            Vector3 viscAccel = Vector3.Zero;
+
+            GetNeighbors(i, _neighborBuffer);
+
+            for (int n = 0; n < _neighborBuffer.Count; n++)
+            {
+                int j = _neighborBuffer[n];
+                var pj = _particles[j];
+
+                // Guard: zero or negative density for neighbor
+                if (pj.Density <= 0.0f)
+                    continue;
+
+                float rhoJ = pj.Density;
+                Vector3 rVec = pj.Position - posI;
+                float dist = rVec.Length();
+
+                // Viscosity kernel Laplacian: ∇²W_visc(r, h) = 45/(π h⁶) × (h - |r|)
+                float laplacian = SPHKernels.ViscosityLaplacian(dist, h, viscLapCoeff);
+
+                // Velocity difference: v_j - v_i
+                Vector3 velDiff = pj.Velocity - velI;
+
+                // Viscosity term: m_j × ν × (v_j - v_i)/ρ_j × ∇²W
+                viscAccel += (mass * nu / rhoJ) * velDiff * laplacian;
+            }
+
+            // Divide by own density to complete the SPH average
+            viscAccel = viscAccel / rhoI;
+
+            // Diagnostic: track force magnitude (convert accel to force: F = a × m)
+            float forceMag = (viscAccel * pi.Mass).Length();
+            if (_viscosityForceCount == 0 || forceMag < _minViscosityForceMagnitude)
+                _minViscosityForceMagnitude = forceMag;
+            if (forceMag > _maxViscosityForceMagnitude)
+                _maxViscosityForceMagnitude = forceMag;
+            _totalViscosityForceMagnitude += forceMag;
+            _viscosityForceCount++;
+
+            // Add viscous acceleration to existing acceleration (pressure + gravity will be added later)
+            pi.Acceleration += viscAccel;
+            _particles[i] = pi;
+        }
+    }
+
+    /// <summary>
     /// Finds all actual neighbors of particle at the given index.
     /// A neighbor is a particle within smoothing radius distance.
     /// Uses the spatial grid to find candidates, then verifies with squared distance.
@@ -344,6 +453,100 @@ public class FluidSimulation
             if (distSq <= radiusSq)
                 results.Add(candidateIndex);
         }
+    }
+
+    /// <summary>
+    /// Returns the half-extents of the container for rendering.
+    /// X = width/2, Y = height, Z = depth/2. Bottom is at y = 0.
+    /// </summary>
+    public (float HalfX, float Height, float HalfZ) GetContainerHalfExtents()
+    {
+        return (_parameters.ContainerWidth * 0.5f, _parameters.ContainerHeight, _parameters.ContainerDepth * 0.5f);
+    }
+
+    /// <summary>
+    /// Enforces static container boundaries after position integration.
+    /// For each particle that has crossed a wall, the position is clamped back
+    /// inside the container and the normal velocity component is reflected
+    /// using the configured coefficient of restitution.
+    ///
+    /// Container bounds: x ∈ [-w/2, w/2], y ∈ [0, height] (open top), z ∈ [-d/2, d/2].
+    /// </summary>
+    private void HandleBoundaryCollisions()
+    {
+        float halfW = _parameters.ContainerWidth * 0.5f;
+        float halfD = _parameters.ContainerDepth * 0.5f;
+        float height = _parameters.ContainerHeight;
+        float e = _parameters.BoundaryRestitution;
+        int collisions = 0;
+
+        for (int i = 0; i < _particles.Count; i++)
+        {
+            var p = _particles[i];
+            bool hit = false;
+
+            // Bottom wall (y = 0)
+            if (p.Position.Y < 0.0f)
+            {
+                p.Position = new Vector3(p.Position.X, 0.0f, p.Position.Z);
+                if (p.Velocity.Y < 0.0f)
+                {
+                    p.Velocity = new Vector3(p.Velocity.X, -p.Velocity.Y * e, p.Velocity.Z);
+                    hit = true;
+                }
+            }
+
+            // Left wall (x = -halfW)
+            if (p.Position.X < -halfW)
+            {
+                p.Position = new Vector3(-halfW, p.Position.Y, p.Position.Z);
+                if (p.Velocity.X < 0.0f)
+                {
+                    p.Velocity = new Vector3(-p.Velocity.X * e, p.Velocity.Y, p.Velocity.Z);
+                    hit = true;
+                }
+            }
+
+            // Right wall (x = +halfW)
+            if (p.Position.X > halfW)
+            {
+                p.Position = new Vector3(halfW, p.Position.Y, p.Position.Z);
+                if (p.Velocity.X > 0.0f)
+                {
+                    p.Velocity = new Vector3(-p.Velocity.X * e, p.Velocity.Y, p.Velocity.Z);
+                    hit = true;
+                }
+            }
+
+            // Front wall (z = -halfD)
+            if (p.Position.Z < -halfD)
+            {
+                p.Position = new Vector3(p.Position.X, p.Position.Y, -halfD);
+                if (p.Velocity.Z < 0.0f)
+                {
+                    p.Velocity = new Vector3(p.Velocity.X, p.Velocity.Y, -p.Velocity.Z * e);
+                    hit = true;
+                }
+            }
+
+            // Back wall (z = +halfD)
+            if (p.Position.Z > halfD)
+            {
+                p.Position = new Vector3(p.Position.X, p.Position.Y, halfD);
+                if (p.Velocity.Z > 0.0f)
+                {
+                    p.Velocity = new Vector3(p.Velocity.X, p.Velocity.Y, -p.Velocity.Z * e);
+                    hit = true;
+                }
+            }
+
+            if (hit)
+                collisions++;
+
+            _particles[i] = p;
+        }
+
+        _lastBoundaryCollisions = collisions;
     }
 
     /// <summary>
@@ -518,15 +721,163 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// Diagnostic (F4): reports pressure force statistics after ComputeAllPressureForces has been called.
-    /// Includes min/max/average pressure force magnitude, max acceleration, max velocity,
+    /// Diagnostic (F5): pressure-restoration test.
+    /// After a clean lattice is spawned and one particle is displaced inward, this method
+    /// runs the full SPH pipeline (grid, density, pressure, force) and reports detailed
+    /// information about the perturbed particle and its neighbors.
+    /// Validates that the pressure force opposes the compression.
+    /// 
+    /// Call after: RebuildGrid, ComputeAllDensities, ComputeAllPressures, ComputeAllPressureForces.
+    /// </summary>
+    /// <param name="perturbedIndex">Index of the particle that was displaced.</param>
+    /// <param name="displacement">The displacement vector that was applied (original → perturbed).</param>
+    public string RunPressureRestorationDiagnostic(int perturbedIndex, Vector3 displacement)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        sb.AppendLine("═══════════════════════════════════════════════════════════");
+        sb.AppendLine("  PRESSURE RESTORATION TEST");
+        sb.AppendLine("═══════════════════════════════════════════════════════════");
+
+        // --- Perturbed particle ---
+        var pp = _particles[perturbedIndex];
+        float dispMag = displacement.Length();
+
+        sb.AppendLine();
+        sb.AppendLine($"Perturbed particle index: {perturbedIndex}");
+        sb.AppendLine($"  Position:          ({pp.Position.X:F6}, {pp.Position.Y:F6}, {pp.Position.Z:F6})");
+        sb.AppendLine($"  Displacement:      ({displacement.X:F6}, {displacement.Y:F6}, {displacement.Z:F6})  |d| = {dispMag:F6} m");
+        sb.AppendLine($"  Density:           {pp.Density:F6}  (rest = {_parameters.RestDensity:F4})");
+        sb.AppendLine($"  Pressure:          {pp.Pressure:F6}  (k={_parameters.PressureStiffness}, P = k*(ρ-ρ₀))");
+        sb.AppendLine($"  Pressure force:    ({pp.Acceleration.X * pp.Mass:F6}, {pp.Acceleration.Y * pp.Mass:F6}, {pp.Acceleration.Z * pp.Mass:F6})  |F| = {(pp.Acceleration * pp.Mass).Length():F6} N");
+        sb.AppendLine($"  Acceleration:      ({pp.Acceleration.X:F6}, {pp.Acceleration.Y:F6}, {pp.Acceleration.Z:F6})  |a| = {pp.Acceleration.Length():F6} m/s²");
+
+        // Direction the particle was pushed (inward) vs force direction
+        Vector3 forceOnPerturbed = pp.Acceleration * pp.Mass;
+        if (dispMag > 1e-10f)
+        {
+            Vector3 dispDir = displacement / dispMag;
+            float alignment = Vector3.Dot(forceOnPerturbed, dispDir);
+            sb.AppendLine($"  Force·displacement: {alignment:F6}  (negative = restoring, positive = amplifying)");
+            sb.AppendLine($"  Force opposes displacement: {(alignment < 0 ? "YES" : "NO")}");
+        }
+
+        // --- Neighbors ---
+        GetNeighbors(perturbedIndex, _neighborBuffer);
+        sb.AppendLine();
+        sb.AppendLine($"Immediate SPH neighbors: {_neighborBuffer.Count}");
+        sb.AppendLine($"  h = {_parameters.SmoothingRadius:F4} m,  h² = {_parameters.SmoothingRadius * _parameters.SmoothingRadius:F6}");
+
+        float totalNeighborDensity = 0.0f;
+        float totalNeighborPressure = 0.0f;
+        float minNeighborDist = float.MaxValue;
+        float maxNeighborDist = float.MinValue;
+
+        for (int n = 0; n < _neighborBuffer.Count; n++)
+        {
+            int j = _neighborBuffer[n];
+            var pj = _particles[j];
+            Vector3 diff = pj.Position - pp.Position;
+            float dist = diff.Length();
+            totalNeighborDensity += pj.Density;
+            totalNeighborPressure += pj.Pressure;
+            if (dist < minNeighborDist) minNeighborDist = dist;
+            if (dist > maxNeighborDist) maxNeighborDist = dist;
+
+            Vector3 forceJ = pj.Acceleration * pj.Mass;
+            sb.AppendLine($"  [{j,3}] pos=({pj.Position.X:F6}, {pj.Position.Y:F6}, {pj.Position.Z:F6})" +
+                         $"  dist={dist:F6}" +
+                         $"  ρ={pj.Density:F4}  P={pj.Pressure:F4}" +
+                         $"  F=({forceJ.X:E4}, {forceJ.Y:E4}, {forceJ.Z:E4})");
+        }
+
+        if (_neighborBuffer.Count > 0)
+        {
+            sb.AppendLine($"  Neighbor distance range: [{minNeighborDist:F6}, {maxNeighborDist:F6}]");
+            sb.AppendLine($"  Avg neighbor density:   {totalNeighborDensity / _neighborBuffer.Count:F4}");
+            sb.AppendLine($"  Avg neighbor pressure:  {totalNeighborPressure / _neighborBuffer.Count:F4}");
+        }
+
+        // --- Symmetry check: compare with a mirror particle if it exists ---
+        // Find the particle at the mirror position relative to center (approx)
+        // For a clean lattice, the center of the block is at (0, 0.5, 0).
+        // We look for a particle near the displaced particle's original position.
+        sb.AppendLine();
+        sb.AppendLine("--- Symmetry check (mirror particle) ---");
+
+        Vector3 originalPos = pp.Position - displacement;
+        // The "opposite" particle from center would be at originalPos reflected through center
+        Vector3 center = new Vector3(0.0f, 0.5f, 0.0f);
+        Vector3 mirrorTarget = 2.0f * center - originalPos;
+
+        // Search for closest particle to mirrorTarget
+        int mirrorIndex = -1;
+        float mirrorDistSq = float.MaxValue;
+        for (int i = 0; i < _particles.Count; i++)
+        {
+            if (i == perturbedIndex) continue;
+            float dSq = (_particles[i].Position - mirrorTarget).LengthSquared();
+            if (dSq < mirrorDistSq)
+            {
+                mirrorDistSq = dSq;
+                mirrorIndex = i;
+            }
+        }
+
+        if (mirrorIndex >= 0 && mirrorDistSq < 0.01f * 0.01f)
+        {
+            var pm = _particles[mirrorIndex];
+            Vector3 mirrorDisp = -displacement; // mirror particle moved in opposite direction
+            Vector3 mirrorForceVec = pm.Acceleration * pm.Mass;
+            float mirrorForceAlign = 0.0f;
+            if (mirrorDisp.Length() > 1e-10f)
+            {
+                mirrorForceAlign = Vector3.Dot(mirrorForceVec, mirrorDisp / mirrorDisp.Length());
+            }
+            sb.AppendLine($"  Mirror particle [{mirrorIndex}] at ({pm.Position.X:F6}, {pm.Position.Y:F6}, {pm.Position.Z:F6})");
+            sb.AppendLine($"    Density: {pm.Density:F6},  Pressure: {pm.Pressure:F6}");
+            sb.AppendLine($"    Force: ({mirrorForceVec.X:E4}, {mirrorForceVec.Y:E4}, {mirrorForceVec.Z:E4})  |F| = {mirrorForceVec.Length():F6}");
+            sb.AppendLine($"    Force·mirror-displacement: {mirrorForceAlign:F6}  (should be restoring)");
+        }
+        else
+        {
+            sb.AppendLine($"  No mirror particle found within tolerance (closest dist²={mirrorDistSq:F6})");
+        }
+
+        // --- Summary ---
+        sb.AppendLine();
+        sb.AppendLine("--- Summary ---");
+        sb.AppendLine($"  Particles: {_particles.Count}");
+        sb.AppendLine($"  Grid cells: {_grid.CellCount}");
+        if (dispMag > 1e-10f)
+        {
+            Vector3 forceDir = forceOnPerturbed.Length() > 1e-10f ? forceOnPerturbed / forceOnPerturbed.Length() : Vector3.Zero;
+            Vector3 dispDir = displacement / dispMag;
+            float cosAngle = Vector3.Dot(forceDir, dispDir);
+            sb.AppendLine($"  Force magnitude:   {forceOnPerturbed.Length():E6} N");
+            sb.AppendLine($"  Displacement magnitude: {dispMag:F6} m");
+            sb.AppendLine($"  cos(angle) between force and displacement: {cosAngle:F6}");
+            sb.AppendLine($"  Interpretation: force {(cosAngle < 0 ? "RESTORES" : "AMPLIFIES")} the perturbation");
+        }
+
+        sb.AppendLine("═══════════════════════════════════════════════════════════");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Diagnostic (F4): reports pressure and viscosity force statistics after
+    /// ComputeAllPressureForces and ComputeAllViscosityForces have been called.
+    /// Includes min/max/average force magnitudes, max acceleration, max velocity,
     /// and non-finite value detection.
     /// </summary>
     public string RunPressureForceDiagnostic()
     {
         int n = _particles.Count;
-        float avgForce = _pressureForceCount > 0
+        float avgPressureForce = _pressureForceCount > 0
             ? _totalPressureForceMagnitude / _pressureForceCount
+            : 0.0f;
+        float avgViscosityForce = _viscosityForceCount > 0
+            ? _totalViscosityForceMagnitude / _viscosityForceCount
             : 0.0f;
 
         // Count zero-density particles
@@ -548,13 +899,16 @@ public class FluidSimulation
 
         return $"Particles: {n}\n" +
                $"  Pressure force magnitude — min: {_minPressureForceMagnitude:E4}, " +
-               $"max: {_maxPressureForceMagnitude:E4}, avg: {avgForce:E4}\n" +
-               $"  Max acceleration (pressure only): {_maxAccelerationMagnitude:E4} m/s²\n" +
+               $"max: {_maxPressureForceMagnitude:E4}, avg: {avgPressureForce:E4}\n" +
+               $"  Viscosity force magnitude — min: {_minViscosityForceMagnitude:E4}, " +
+               $"max: {_maxViscosityForceMagnitude:E4}, avg: {avgViscosityForce:E4}\n" +
+               $"  Max acceleration (pressure+visc): {_maxAccelerationMagnitude:E4} m/s²\n" +
                $"  Max velocity: {_maxVelocityMagnitude:E4} m/s\n" +
                $"  Zero-density particles: {zeroDensityCount}/{n}\n" +
                $"  Particles with non-zero acceleration: {particlesWithPressureAccel}/{n}\n" +
                $"  Non-finite values encountered: {_pressureForceNonFinite}\n" +
                $"  Parameters: h={_parameters.SmoothingRadius}, mass={_parameters.ParticleMass}, " +
-               $"k={_parameters.PressureStiffness}, restDensity={_parameters.RestDensity}";
+               $"k={_parameters.PressureStiffness}, restDensity={_parameters.RestDensity}, " +
+               $"ν={_parameters.KinematicViscosity:E2}";
     }
 }
