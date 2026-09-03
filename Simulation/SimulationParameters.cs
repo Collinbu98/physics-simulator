@@ -93,4 +93,14 @@ public class SimulationParameters
 	/// Applied only to the velocity component normal to the wall.
 	/// </summary>
 	public float BoundaryRestitution { get; set; } = 0.3f;
+
+	// ── Boundary particles ─────────────────────────────────────────────
+
+	/// <summary>
+	/// Spacing between static boundary particles along container walls (meters).
+	/// Boundary particles participate in SPH neighbor queries so fluid particles
+	/// near a wall see solid material in the kernel support region.
+	/// Should be comparable to the fluid particle spacing for consistent density.
+	/// </summary>
+	public float BoundaryParticleSpacing { get; set; } = 0.06f;
 }

@@ -35,9 +35,11 @@ public partial class SimulationNode : Node3D
 
         // Start paused so the user can see the initial state
         IsRunning = false;
-        GD.Print($"[SimulationNode] Ready. {_simulation.ParticleCount} particles. " +
+        GD.Print($"[SimulationNode] Ready. " +
+                 $"{_simulation.FluidParticleCount} fluid + {_simulation.BoundaryParticleCount} boundary particles. " +
                  $"Container: {parameters.ContainerWidth}×{parameters.ContainerHeight}×{parameters.ContainerDepth} m, " +
-                 $"restitution={parameters.BoundaryRestitution}. Simulation paused.");
+                 $"restitution={parameters.BoundaryRestitution}, boundarySpacing={parameters.BoundaryParticleSpacing} m. " +
+                 $"Simulation paused.");
     }
 
     public override void _Process(double delta)
@@ -119,11 +121,12 @@ public partial class SimulationNode : Node3D
         if (GetNode<Camera3D>("../Camera3D") is CameraController cam)
             cam.ResetCamera();
 
-        GD.Print($"[SimulationNode] Simulation reset. {_simulation.ParticleCount} particles.");
+        GD.Print($"[SimulationNode] Simulation reset. " +
+                 $"{_simulation.FluidParticleCount} fluid + {_simulation.BoundaryParticleCount} boundary particles.");
     }
 
     /// <summary>
-    /// Creates a small 4x4x4 cube of particles for testing.
+    /// Creates a small 4x4x4 cube of fluid particles and boundary particles for testing.
     /// </summary>
     private void SpawnTestParticles()
     {
@@ -145,12 +148,15 @@ public partial class SimulationNode : Node3D
             _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
         }
 
+        // Generate static boundary particles along the container walls
+        _simulation.GenerateBoundaryParticles();
+
         _renderer.UpdateParticles(_simulation.Particles);
     }
 
     /// <summary>
-    /// Creates a perfect 4×4×4 lattice with no jitter, centered at (0, 0.5, 0).
-    /// Used by the pressure-restoration diagnostic to get a clean, symmetric baseline.
+    /// Creates a perfect 4×4×4 fluid particle lattice with no jitter, centered at (0, 0.5, 0),
+    /// plus boundary particles. Used by the pressure-restoration diagnostic.
     /// </summary>
     private void SpawnCleanLattice()
     {
@@ -169,6 +175,8 @@ public partial class SimulationNode : Node3D
             );
             _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
         }
+
+        _simulation.GenerateBoundaryParticles();
 
         _renderer.UpdateParticles(_simulation.Particles);
     }

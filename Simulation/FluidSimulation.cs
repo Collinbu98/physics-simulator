@@ -15,6 +15,7 @@ public class FluidSimulation
     private readonly SpatialGrid _grid;
     private readonly List<int> _neighborBuffer = new();
     private float _timeAccumulator;
+    private int _boundaryParticleCount;
 
     // Diagnostic storage for pressure force magnitudes (updated each step)
     private float _minPressureForceMagnitude = float.MaxValue;
@@ -40,9 +41,19 @@ public class FluidSimulation
     public IReadOnlyList<Particle> Particles => _particles;
 
     /// <summary>
-    /// The current number of particles in the simulation.
+    /// The current number of particles in the simulation (fluid + boundary).
     /// </summary>
     public int ParticleCount => _particles.Count;
+
+    /// <summary>
+    /// Number of static boundary particles. Remaining particles are fluid.
+    /// </summary>
+    public int BoundaryParticleCount => _boundaryParticleCount;
+
+    /// <summary>
+    /// Number of fluid (dynamic) particles.
+    /// </summary>
+    public int FluidParticleCount => _particles.Count - _boundaryParticleCount;
 
     public SimulationParameters Parameters => _parameters;
 
@@ -73,18 +84,20 @@ public class FluidSimulation
     public void Reset()
     {
         _particles.Clear();
+        _boundaryParticleCount = 0;
         _grid.Clear();
         _timeAccumulator = 0.0f;
         _stepCount = 0;
     }
 
     /// <summary>
-    /// Adds a single particle with the given state.
+    /// Adds a single fluid particle with the given state.
     /// </summary>
     public void AddParticle(Vector3 position, Vector3 velocity, float mass)
     {
         _particles.Add(new Particle
         {
+            Type = ParticleType.Fluid,
             Position = position,
             Velocity = velocity,
             Acceleration = Vector3.Zero,
@@ -103,6 +116,107 @@ public class FluidSimulation
         var p = _particles[index];
         p.Position = newPosition;
         _particles[index] = p;
+    }
+
+    /// <summary>
+    /// Generates static boundary particles along the five interior faces of the
+    /// container (bottom, left, right, front, back). The top is open.
+    /// Boundary particles participate in SPH neighbor queries so fluid particles
+    /// near a wall receive density and pressure support from the solid boundary.
+    /// Particles are placed at <see cref="SimulationParameters.BoundaryParticleSpacing"/>
+    /// intervals, offset inward from each wall by half the spacing.
+    /// </summary>
+    public void GenerateBoundaryParticles()
+    {
+        float spacing = _parameters.BoundaryParticleSpacing;
+        float halfSpacing = spacing * 0.5f;
+        float halfW = _parameters.ContainerWidth * 0.5f;
+        float halfD = _parameters.ContainerDepth * 0.5f;
+        float mass = _parameters.ParticleMass;
+        float boundaryDensity = _parameters.RestDensity;
+        int countBeforeBoundary = _particles.Count;
+
+        // Bottom wall (y = 0) — particles placed at y = halfSpacing
+        for (float x = -halfW + halfSpacing; x < halfW; x += spacing)
+        for (float z = -halfD + halfSpacing; z < halfD; z += spacing)
+        {
+            _particles.Add(new Particle
+            {
+                Type = ParticleType.Boundary,
+                Position = new Vector3(x, halfSpacing, z),
+                Velocity = Vector3.Zero,
+                Acceleration = Vector3.Zero,
+                Density = boundaryDensity,
+                Pressure = 0.0f,
+                Mass = mass,
+            });
+        }
+
+        // Left wall (x = -halfW)
+        for (float y = halfSpacing; y < _parameters.ContainerHeight; y += spacing)
+        for (float z = -halfD + halfSpacing; z < halfD; z += spacing)
+        {
+            _particles.Add(new Particle
+            {
+                Type = ParticleType.Boundary,
+                Position = new Vector3(-halfW + halfSpacing, y, z),
+                Velocity = Vector3.Zero,
+                Acceleration = Vector3.Zero,
+                Density = boundaryDensity,
+                Pressure = 0.0f,
+                Mass = mass,
+            });
+        }
+
+        // Right wall (x = +halfW)
+        for (float y = halfSpacing; y < _parameters.ContainerHeight; y += spacing)
+        for (float z = -halfD + halfSpacing; z < halfD; z += spacing)
+        {
+            _particles.Add(new Particle
+            {
+                Type = ParticleType.Boundary,
+                Position = new Vector3(halfW - halfSpacing, y, z),
+                Velocity = Vector3.Zero,
+                Acceleration = Vector3.Zero,
+                Density = boundaryDensity,
+                Pressure = 0.0f,
+                Mass = mass,
+            });
+        }
+
+        // Front wall (z = -halfD)
+        for (float x = -halfW + halfSpacing; x < halfW; x += spacing)
+        for (float y = halfSpacing; y < _parameters.ContainerHeight; y += spacing)
+        {
+            _particles.Add(new Particle
+            {
+                Type = ParticleType.Boundary,
+                Position = new Vector3(x, y, -halfD + halfSpacing),
+                Velocity = Vector3.Zero,
+                Acceleration = Vector3.Zero,
+                Density = boundaryDensity,
+                Pressure = 0.0f,
+                Mass = mass,
+            });
+        }
+
+        // Back wall (z = +halfD)
+        for (float x = -halfW + halfSpacing; x < halfW; x += spacing)
+        for (float y = halfSpacing; y < _parameters.ContainerHeight; y += spacing)
+        {
+            _particles.Add(new Particle
+            {
+                Type = ParticleType.Boundary,
+                Position = new Vector3(x, y, halfD - halfSpacing),
+                Velocity = Vector3.Zero,
+                Acceleration = Vector3.Zero,
+                Density = boundaryDensity,
+                Pressure = 0.0f,
+                Mass = mass,
+            });
+        }
+
+        _boundaryParticleCount = _particles.Count - countBeforeBoundary;
     }
 
     /// <summary>
@@ -152,7 +266,9 @@ public class FluidSimulation
         // Reset velocity diagnostic before integration
         _maxVelocityMagnitude = 0.0f;
 
-        for (int i = 0; i < _particles.Count; i++)
+        // Only integrate fluid particles — boundary particles are static
+        int fluidCount = _particles.Count - _boundaryParticleCount;
+        for (int i = 0; i < fluidCount; i++)
         {
             var p = _particles[i];
 
@@ -189,7 +305,9 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// Computes density for all particles using Poly6 kernel.
+    /// Computes density for all particles (fluid and boundary) using the Poly6 kernel.
+    /// Boundary particles need density computed so they are recognized as valid
+    /// neighbors in force calculations (the density guard checks pj.Density > 0).
     /// Must be called after RebuildGrid so the grid is current.
     /// Public so external code (e.g. diagnostics) can trigger density computation
     /// without running a full simulation step.
@@ -226,7 +344,8 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// Computes pressure for all particles using the equation of state: P = k * (rho - rho_0).
+    /// Computes pressure for fluid particles using the equation of state: P = k * (rho - rho_0).
+    /// Boundary particles keep their pre-assigned density and zero pressure.
     /// Must be called after ComputeAllDensities so that Particle.Density is populated.
     /// Does not affect velocity, acceleration, or position.
     /// </summary>
@@ -235,7 +354,8 @@ public class FluidSimulation
         float k = _parameters.PressureStiffness;
         float rho0 = _parameters.RestDensity;
 
-        for (int i = 0; i < _particles.Count; i++)
+        int fluidCount = _particles.Count - _boundaryParticleCount;
+        for (int i = 0; i < fluidCount; i++)
         {
             var p = _particles[i];
             p.Pressure = k * (p.Density - rho0);
@@ -244,10 +364,14 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// Computes SPH pressure forces for all particles using the symmetric formulation:
+    /// Computes SPH pressure forces for fluid particles using the symmetric formulation:
     ///   F_i = Σ_j m_j × (P_i/ρ_i² + P_j/ρ_j²) × ∇W_spiky(r_ij, h)
     ///
-    /// Uses the Spiky kernel gradient. Handles zero-density and coincident particles safely.
+    /// Only fluid particles are processed in the outer loop. Boundary particles
+    /// appear as neighbors: they contribute via their pre-assigned rest density
+    /// and zero pressure. Since P_j = 0 for boundary particles, a fluid particle
+    /// near a wall receives a pressure push away from the solid material.
+    /// Boundary particles never receive force or acceleration.
     /// Must be called after ComputeAllDensities and ComputeAllPressures.
     /// Stores the force-per-unit-mass (acceleration) in Particle.Acceleration.
     /// </summary>
@@ -267,7 +391,10 @@ public class FluidSimulation
         _maxAccelerationMagnitude = 0.0f;
         _maxVelocityMagnitude = 0.0f;
 
-        for (int i = 0; i < _particles.Count; i++)
+        // Only compute pressure forces for fluid particles.
+        // Boundary particles (indices >= fluidCount) are static and never receive forces.
+        int fluidCount = _particles.Count - _boundaryParticleCount;
+        for (int i = 0; i < fluidCount; i++)
         {
             var pi = _particles[i];
 
@@ -343,11 +470,12 @@ public class FluidSimulation
     }
 
     /// <summary>
-    /// Computes SPH viscosity forces for all particles using the standard formulation:
+    /// Computes SPH viscosity forces for fluid particles using the standard formulation:
     ///   a_i^visc = (1/ρ_i) × Σ_j m_j × ν × (v_j - v_i)/ρ_j × ∇²W_visc(r_ij, h)
     ///
-    /// Uses the viscosity kernel Laplacian: ∇²W_visc(r, h) = 45/(π h⁶) × (h - |r|).
-    /// This force pulls particle velocities toward their neighbors' velocities (velocity diffusion).
+    /// Only fluid particles are processed in the outer loop. Boundary particles
+    /// appear as neighbors with zero velocity, producing a no-slip wall condition:
+    /// fluid particles near a wall are decelerated toward the wall's zero velocity.
     /// Must be called after RebuildGrid and ComputeAllDensities.
     /// Adds the viscous acceleration to the existing Particle.Acceleration (which already contains
     /// pressure acceleration from ComputeAllPressureForces).
@@ -366,7 +494,9 @@ public class FluidSimulation
         _totalViscosityForceMagnitude = 0.0f;
         _viscosityForceCount = 0;
 
-        for (int i = 0; i < _particles.Count; i++)
+        // Only compute viscosity for fluid particles. Boundary particles are static.
+        int fluidCount = _particles.Count - _boundaryParticleCount;
+        for (int i = 0; i < fluidCount; i++)
         {
             var pi = _particles[i];
 
@@ -480,7 +610,10 @@ public class FluidSimulation
         float e = _parameters.BoundaryRestitution;
         int collisions = 0;
 
-        for (int i = 0; i < _particles.Count; i++)
+        // Only enforce geometric boundaries on fluid particles.
+        // Boundary particles are placed inside the container and never move.
+        int fluidCount = _particles.Count - _boundaryParticleCount;
+        for (int i = 0; i < fluidCount; i++)
         {
             var p = _particles[i];
             bool hit = false;
@@ -675,10 +808,12 @@ public class FluidSimulation
     /// Diagnostic: reports pressure statistics computed from the equation of state.
     /// Assumes ComputeAllDensities and ComputeAllPressures have been called.
     /// Verifies P = k * (rho - rho_0) by recalculating from stored density values.
+    /// Reports only on fluid particles (boundary particles have zero pressure by design).
     /// </summary>
     public string RunPressureDiagnostic()
     {
         int n = _particles.Count;
+        int fluidCount = n - _boundaryParticleCount;
         float k = _parameters.PressureStiffness;
         float rho0 = _parameters.RestDensity;
 
@@ -690,7 +825,8 @@ public class FluidSimulation
         float totalDensity = 0.0f;
         int eosMismatches = 0;
 
-        for (int i = 0; i < n; i++)
+        // Only report pressure stats for fluid particles
+        for (int i = 0; i < fluidCount; i++)
         {
             float density = _particles[i].Density;
             float pressure = _particles[i].Pressure;
@@ -709,14 +845,14 @@ public class FluidSimulation
             totalDensity += density;
         }
 
-        float avgPressure = n > 0 ? totalPressure / n : 0.0f;
-        float avgDensity = n > 0 ? totalDensity / n : 0.0f;
+        float avgPressure = fluidCount > 0 ? totalPressure / fluidCount : 0.0f;
+        float avgDensity = fluidCount > 0 ? totalDensity / fluidCount : 0.0f;
 
-        return $"Particles: {n}\n" +
+        return $"Particles: {n} (fluid: {fluidCount}, boundary: {_boundaryParticleCount})\n" +
                $"  Pressure — min: {minPressure:F4}, max: {maxPressure:F4}, avg: {avgPressure:F4}\n" +
                $"  Density  — min: {minDensity:F4}, max: {maxDensity:F4}, avg: {avgDensity:F4}\n" +
                $"  Rest density: {rho0:F4}, Pressure stiffness (k): {k:F4}\n" +
-               $"  EOS mismatches: {eosMismatches}/{n} " +
+               $"  EOS mismatches: {eosMismatches}/{fluidCount} " +
                $"(P = k * (rho - rho_0))";
     }
 
@@ -873,6 +1009,7 @@ public class FluidSimulation
     public string RunPressureForceDiagnostic()
     {
         int n = _particles.Count;
+        int fluidCount = n - _boundaryParticleCount;
         float avgPressureForce = _pressureForceCount > 0
             ? _totalPressureForceMagnitude / _pressureForceCount
             : 0.0f;
@@ -880,32 +1017,32 @@ public class FluidSimulation
             ? _totalViscosityForceMagnitude / _viscosityForceCount
             : 0.0f;
 
-        // Count zero-density particles
+        // Count zero-density fluid particles (boundary particles don't need density for diagnostics)
         int zeroDensityCount = 0;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < fluidCount; i++)
         {
             if (_particles[i].Density <= 0.0f)
                 zeroDensityCount++;
         }
 
         // Verify that acceleration was actually set by pressure force
-        // (check that at least one particle has non-zero acceleration from pressure)
+        // (check that at least one fluid particle has non-zero acceleration from pressure)
         int particlesWithPressureAccel = 0;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < fluidCount; i++)
         {
             if (_particles[i].Acceleration.LengthSquared() > 1e-10f)
                 particlesWithPressureAccel++;
         }
 
-        return $"Particles: {n}\n" +
+        return $"Particles: {n} (fluid: {fluidCount}, boundary: {_boundaryParticleCount})\n" +
                $"  Pressure force magnitude — min: {_minPressureForceMagnitude:E4}, " +
                $"max: {_maxPressureForceMagnitude:E4}, avg: {avgPressureForce:E4}\n" +
                $"  Viscosity force magnitude — min: {_minViscosityForceMagnitude:E4}, " +
                $"max: {_maxViscosityForceMagnitude:E4}, avg: {avgViscosityForce:E4}\n" +
                $"  Max acceleration (pressure+visc): {_maxAccelerationMagnitude:E4} m/s²\n" +
                $"  Max velocity: {_maxVelocityMagnitude:E4} m/s\n" +
-               $"  Zero-density particles: {zeroDensityCount}/{n}\n" +
-               $"  Particles with non-zero acceleration: {particlesWithPressureAccel}/{n}\n" +
+               $"  Zero-density particles: {zeroDensityCount}/{fluidCount}\n" +
+               $"  Particles with non-zero acceleration: {particlesWithPressureAccel}/{fluidCount}\n" +
                $"  Non-finite values encountered: {_pressureForceNonFinite}\n" +
                $"  Parameters: h={_parameters.SmoothingRadius}, mass={_parameters.ParticleMass}, " +
                $"k={_parameters.PressureStiffness}, restDensity={_parameters.RestDensity}, " +
