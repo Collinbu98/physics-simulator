@@ -86,7 +86,7 @@ public partial class SimulationNode : Node3D
             bool keepingUp = stepsPerSec >= targetStepsPerSec * 0.9;
             GD.Print($"[Perf] {_simulation.FluidParticleCount}f+{_simulation.BoundaryParticleCount}b | " +
                      $"sim={simMs:F1}ms render={renderMs:F1}ms total={totalMs:F1}ms | " +
-                     $"fps={fps:F1} steps/s={stepsPerSec:F0} " +
+                     $"fps={fps:F1} step throughput={stepsPerSec:F0} steps/s " +
                      $"(target={targetStepsPerSec:F0}) " +
                      $"{(keepingUp ? "OK" : "SLOW")}");
             _simTimeAccumulator = 0;

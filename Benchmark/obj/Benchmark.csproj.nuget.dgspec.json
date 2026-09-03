@@ -1,0 +1,61 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/collin/physics-simulator/Benchmark/Benchmark.csproj": {}
+  },
+  "projects": {
+    "/home/collin/physics-simulator/Benchmark/Benchmark.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/collin/physics-simulator/Benchmark/Benchmark.csproj",
+        "projectName": "Benchmark",
+        "projectPath": "/home/collin/physics-simulator/Benchmark/Benchmark.csproj",
+        "packagesPath": "/home/collin/.nuget/packages/",
+        "outputPath": "/home/collin/physics-simulator/Benchmark/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/collin/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/lib64/dotnet/sdk/8.0.130/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
