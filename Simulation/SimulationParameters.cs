@@ -70,21 +70,21 @@ public class SimulationParameters
 	/// <summary>
 	/// Width of the container in meters (X axis).
 	/// The container extends from -Width/2 to +Width/2 in X.
-	/// Default of 0.6 m comfortably contains the initial 4×4×4 particle block.
+	/// Default of 1.0 m comfortably contains the 10×10×10 particle block.
 	/// </summary>
-	public float ContainerWidth { get; set; } = 0.6f;
+	public float ContainerWidth { get; set; } = 1.0f;
 
 	/// <summary>
 	/// Height of the container in meters (Y axis).
 	/// The container extends from 0 to Height in Y (bottom at y = 0, open top).
 	/// </summary>
-	public float ContainerHeight { get; set; } = 0.6f;
+	public float ContainerHeight { get; set; } = 1.0f;
 
 	/// <summary>
 	/// Depth of the container in meters (Z axis).
 	/// The container extends from -Depth/2 to +Depth/2 in Z.
 	/// </summary>
-	public float ContainerDepth { get; set; } = 0.6f;
+	public float ContainerDepth { get; set; } = 1.0f;
 
 	/// <summary>
 	/// Coefficient of restitution for boundary collisions.

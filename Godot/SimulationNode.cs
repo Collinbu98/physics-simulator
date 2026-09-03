@@ -1,6 +1,7 @@
 using Godot;
 using PhysicsSimulator.Rendering;
 using PhysicsSimulator.Simulation;
+using System.Diagnostics;
 
 namespace PhysicsSimulator.Godot;
 
@@ -17,6 +18,15 @@ public partial class SimulationNode : Node3D
     /// Whether the simulation is currently running.
     /// </summary>
     public bool IsRunning { get; private set; }
+
+    // Performance tracking
+    private readonly Stopwatch _simStopwatch = new();
+    private readonly Stopwatch _frameStopwatch = new();
+    private double _simTimeAccumulator;
+    private double _frameTimeAccumulator;
+    private int _frameCount;
+    private long _lastStepCount;
+    private double _perfTimer;
 
     public override void _Ready()
     {
@@ -47,8 +57,50 @@ public partial class SimulationNode : Node3D
         if (!IsRunning)
             return;
 
+        // Time simulation separately from rendering
+        _simStopwatch.Restart();
         _simulation.Step((float)delta);
+        _simStopwatch.Stop();
+        _simTimeAccumulator += _simStopwatch.Elapsed.TotalSeconds;
+
+        _frameStopwatch.Restart();
         _renderer.UpdateParticles(_simulation.Particles);
+        _frameStopwatch.Stop();
+        _frameTimeAccumulator += _frameStopwatch.Elapsed.TotalSeconds;
+
+        _frameCount++;
+        _perfTimer += delta;
+
+        // Print performance summary every ~2 seconds
+        if (_perfTimer >= 2.0)
+        {
+            long stepDelta = _simulation.StepCount - _lastStepCount;
+            _lastStepCount = _simulation.StepCount;
+
+            double simMs = _simTimeAccumulator * 1000.0;
+            double renderMs = _frameTimeAccumulator * 1000.0;
+            double totalMs = simMs + renderMs;
+            double fps = _frameCount / totalMs * 1000.0;
+            double stepsPerSec = stepDelta / _perfTimer;
+            double targetStepsPerSec = 1.0 / _simulation.Parameters.TimeStep;
+            bool keepingUp = stepsPerSec >= targetStepsPerSec * 0.9;
+            GD.Print($"[Perf] {_simulation.FluidParticleCount}f+{_simulation.BoundaryParticleCount}b | " +
+                     $"sim={simMs:F1}ms render={renderMs:F1}ms total={totalMs:F1}ms | " +
+                     $"fps={fps:F1} steps/s={stepsPerSec:F0} " +
+                     $"(target={targetStepsPerSec:F0}) " +
+                     $"{(keepingUp ? "OK" : "SLOW")}");
+            _simTimeAccumulator = 0;
+            _frameTimeAccumulator = 0;
+            _frameCount = 0;
+            _perfTimer = 0;
+        }
+
+        // Poll for stage-level profile report from FluidSimulation
+        if (_simulation.LastProfileReport is { } report)
+        {
+            GD.Print(report);
+            _simulation.ClearProfileReport();
+        }
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -126,12 +178,13 @@ public partial class SimulationNode : Node3D
     }
 
     /// <summary>
-    /// Creates a small 4x4x4 cube of fluid particles and boundary particles for testing.
+    /// Creates a 10×10×10 cube of fluid particles and boundary particles for testing.
+    /// The block is centered at (0, 0.35, 0) with 0.05 m spacing so it fits inside the 0.6 m container.
     /// </summary>
     private void SpawnTestParticles()
     {
-        float spacing = 0.08f;
-        int countPerAxis = 4;
+        float spacing = 0.05f;
+        int countPerAxis = 10;
         float offset = (countPerAxis - 1) * spacing * 0.5f;
         var rng = new System.Random();
 
@@ -142,7 +195,7 @@ public partial class SimulationNode : Node3D
             float noise = 0.005f;
             var pos = new System.Numerics.Vector3(
                 x * spacing - offset + (float)(rng.NextDouble() * 2 - 1) * noise,
-                y * spacing + 0.5f + (float)(rng.NextDouble() * 2 - 1) * noise,
+                y * spacing + 0.35f + (float)(rng.NextDouble() * 2 - 1) * noise,
                 z * spacing - offset + (float)(rng.NextDouble() * 2 - 1) * noise
             );
             _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
@@ -155,13 +208,13 @@ public partial class SimulationNode : Node3D
     }
 
     /// <summary>
-    /// Creates a perfect 4×4×4 fluid particle lattice with no jitter, centered at (0, 0.5, 0),
+    /// Creates a perfect 10×10×10 fluid particle lattice with no jitter, centered at (0, 0.35, 0),
     /// plus boundary particles. Used by the pressure-restoration diagnostic.
     /// </summary>
     private void SpawnCleanLattice()
     {
-        float spacing = 0.08f;
-        int countPerAxis = 4;
+        float spacing = 0.05f;
+        int countPerAxis = 10;
         float offset = (countPerAxis - 1) * spacing * 0.5f;
 
         for (int x = 0; x < countPerAxis; x++)
@@ -170,7 +223,7 @@ public partial class SimulationNode : Node3D
         {
             var pos = new System.Numerics.Vector3(
                 x * spacing - offset,
-                y * spacing + 0.5f,
+                y * spacing + 0.35f,
                 z * spacing - offset
             );
             _simulation.AddParticle(pos, System.Numerics.Vector3.Zero, _simulation.Parameters.ParticleMass);
@@ -195,11 +248,11 @@ public partial class SimulationNode : Node3D
         SpawnCleanLattice();
 
         // 2. Choose an interior particle (2,2,2) — well inside the block on all sides
-        int perturbedIndex = 2 + 4 * 2 + 16 * 2; // = 42
+        int perturbedIndex = 2 + 10 * 2 + 100 * 2; // = 222 in a 10×10×10 grid
 
         // 3. Displace inward toward center of block by ~0.01 m
         var originalPos = _simulation.Particles[perturbedIndex].Position;
-        System.Numerics.Vector3 center = new(0.0f, 0.5f, 0.0f);
+        System.Numerics.Vector3 center = new(0.0f, 0.35f, 0.0f);
         System.Numerics.Vector3 inward = center - originalPos;
         float inwardLen = inward.Length();
         float displacementMagnitude = 0.01f;

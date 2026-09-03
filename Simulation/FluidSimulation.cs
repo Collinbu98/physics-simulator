@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 
 namespace PhysicsSimulator.Simulation;
@@ -34,6 +35,29 @@ public class FluidSimulation
 
     private long _stepCount;
     private int _lastBoundaryCollisions;
+
+    // Stage-level profiling accumulators
+    private const int ProfileInterval = 2000;
+    private long _profileSteps;
+    private double _profileGridMs;
+    private double _profileDensityMs;
+    private double _profilePressureMs;
+    private double _profilePressureForceMs;
+    private double _profileViscosityMs;
+    private double _profileIntegrationMs;
+    private double _profileBoundaryMs;
+    private readonly Stopwatch _sw = new();
+
+    /// <summary>
+    /// Set to a profile report string after every ProfileInterval steps, then cleared by reader.
+    /// SimulationNode polls this and prints via GD.Print.
+    /// </summary>
+    public string? LastProfileReport { get; private set; }
+
+    /// <summary>
+    /// Clears the profile report after it has been consumed by the caller.
+    /// </summary>
+    public void ClearProfileReport() => LastProfileReport = null;
 
     /// <summary>
     /// Read-only access to particle data.
@@ -88,6 +112,14 @@ public class FluidSimulation
         _grid.Clear();
         _timeAccumulator = 0.0f;
         _stepCount = 0;
+        _profileSteps = 0;
+        _profileGridMs = 0;
+        _profileDensityMs = 0;
+        _profilePressureMs = 0;
+        _profilePressureForceMs = 0;
+        _profileViscosityMs = 0;
+        _profileIntegrationMs = 0;
+        _profileBoundaryMs = 0;
     }
 
     /// <summary>
@@ -136,14 +168,14 @@ public class FluidSimulation
         float boundaryDensity = _parameters.RestDensity;
         int countBeforeBoundary = _particles.Count;
 
-        // Bottom wall (y = 0) — particles placed at y = halfSpacing
+        // Bottom wall (y = 0) — particles placed at y = -halfSpacing (behind the collision plane)
         for (float x = -halfW + halfSpacing; x < halfW; x += spacing)
         for (float z = -halfD + halfSpacing; z < halfD; z += spacing)
         {
             _particles.Add(new Particle
             {
                 Type = ParticleType.Boundary,
-                Position = new Vector3(x, halfSpacing, z),
+                Position = new Vector3(x, -halfSpacing, z),
                 Velocity = Vector3.Zero,
                 Acceleration = Vector3.Zero,
                 Density = boundaryDensity,
@@ -255,41 +287,93 @@ public class FluidSimulation
     {
         _stepCount++;
         _lastBoundaryCollisions = 0;
+
+        // --- Profiled stages ---
+        _sw.Restart();
         RebuildGrid();
+        _sw.Stop();
+        _profileGridMs += _sw.Elapsed.TotalMilliseconds;
+
+        _sw.Restart();
         ComputeAllDensities();
+        _sw.Stop();
+        _profileDensityMs += _sw.Elapsed.TotalMilliseconds;
+
+        _sw.Restart();
         ComputeAllPressures();
+        _sw.Stop();
+        _profilePressureMs += _sw.Elapsed.TotalMilliseconds;
+
+        _sw.Restart();
         ComputeAllPressureForces();
+        _sw.Stop();
+        _profilePressureForceMs += _sw.Elapsed.TotalMilliseconds;
+
+        _sw.Restart();
         ComputeAllViscosityForces();
+        _sw.Stop();
+        _profileViscosityMs += _sw.Elapsed.TotalMilliseconds;
 
+        _sw.Restart();
         var gravity = new Vector3(0.0f, _parameters.Gravity, 0.0f);
-
-        // Reset velocity diagnostic before integration
         _maxVelocityMagnitude = 0.0f;
-
-        // Only integrate fluid particles — boundary particles are static
         int fluidCount = _particles.Count - _boundaryParticleCount;
         for (int i = 0; i < fluidCount; i++)
         {
             var p = _particles[i];
-
-            // Combine gravity and pressure acceleration (already stored in p.Acceleration)
-            // p.Acceleration was set by ComputeAllPressureForces; add gravity here
             p.Acceleration += gravity;
-
-            // Euler integration
             p.Velocity += p.Acceleration * dt;
             p.Position += p.Velocity * dt;
-
             _particles[i] = p;
-
-            // Track max velocity magnitude for diagnostics
             float velMag = p.Velocity.Length();
             if (velMag > _maxVelocityMagnitude)
                 _maxVelocityMagnitude = velMag;
         }
+        _sw.Stop();
+        _profileIntegrationMs += _sw.Elapsed.TotalMilliseconds;
 
-        // Enforce container boundaries after position integration
+        _sw.Restart();
         HandleBoundaryCollisions();
+        _sw.Stop();
+        _profileBoundaryMs += _sw.Elapsed.TotalMilliseconds;
+
+        _profileSteps++;
+
+        if (_profileSteps >= ProfileInterval)
+        {
+            double grid = _profileGridMs;
+            double density = _profileDensityMs;
+            double pressure = _profilePressureMs;
+            double pressF = _profilePressureForceMs;
+            double visc = _profileViscosityMs;
+            double integ = _profileIntegrationMs;
+            double bndry = _profileBoundaryMs;
+            double total = grid + density + pressure + pressF + visc + integ + bndry;
+            double avg = total / _profileSteps;
+            double pct(double v) => total > 0 ? v / total * 100.0 : 0;
+
+            LastProfileReport =
+                $"[Profile] {FluidParticleCount}f+{_boundaryParticleCount}b | {_profileSteps} steps\n" +
+                $"  Grid:         {grid,8:F2} ms  ({pct(grid):F1}%)\n" +
+                $"  Density:      {density,8:F2} ms  ({pct(density):F1}%)\n" +
+                $"  Pressure:     {pressure,8:F2} ms  ({pct(pressure):F1}%)\n" +
+                $"  PressureF:    {pressF,8:F2} ms  ({pct(pressF):F1}%)\n" +
+                $"  Viscosity:    {visc,8:F2} ms  ({pct(visc):F1}%)\n" +
+                $"  Integration:  {integ,8:F2} ms  ({pct(integ):F1}%)\n" +
+                $"  Boundary:     {bndry,8:F2} ms  ({pct(bndry):F1}%)\n" +
+                $"  ─────────────────────────────────\n" +
+                $"  Total:        {total,8:F2} ms  avg={avg:F4} ms/step\n" +
+                $"  Steps/sec:    {_profileSteps / (total / 1000.0),8:F0}  (target {(int)(1.0 / _parameters.TimeStep)})";
+
+            _profileSteps = 0;
+            _profileGridMs = 0;
+            _profileDensityMs = 0;
+            _profilePressureMs = 0;
+            _profilePressureForceMs = 0;
+            _profileViscosityMs = 0;
+            _profileIntegrationMs = 0;
+            _profileBoundaryMs = 0;
+        }
     }
 
     /// <summary>
